@@ -2,28 +2,46 @@ import * as dotenv from 'dotenv';
 import { logger, logError } from './utils/logger';
 import { SupabaseClientManager } from './database/supabase.client';
 import { BybitExchange } from './exchanges/bybit/BybitExchange';
+import { BitgetExchange } from './exchanges/bitget/BitgetExchange';
+import { KucoinExchange } from './exchanges/kucoin/KucoinExchange';
+import { HyperliquidExchange } from './exchanges/hyperliquid/HyperliquidExchange';
 import { DataCollector } from './services/DataCollector';
 import { ArbitrageAnalyzer } from './services/ArbitrageAnalyzer';
+import { OrderExecutor } from './services/OrderExecutor';
+import { PositionMonitor } from './services/PositionMonitor';
+import { RiskManager } from './services/RiskManager';
+import { TelegramService } from './services/TelegramService';
 import { IExchange } from './exchanges/interfaces/IExchange';
 import { ArbitrageOpportunity } from './types/common';
 import { arbitrageConfig, tradingParams } from './config/arbitrage.config';
+import { telegramConfig } from './config/telegram.config';
+import { getSymbolMapper } from './utils/symbolMapper';
+import { SymbolMappingService } from './services/SymbolMappingService';
 import { sleep } from './utils/helpers';
 
 // Load environment variables
 dotenv.config();
 
 class FundingArbitrageEngine {
-  private exchanges: IExchange[] = [];
   private dataCollector: DataCollector;
-  private arbitrageAnalyzer: ArbitrageAnalyzer;
+  private arbitrageAnalyzer!: ArbitrageAnalyzer;
+  private orderExecutor!: OrderExecutor;
+  private positionMonitor!: PositionMonitor;
+  private riskManager!: RiskManager;
+  private telegramService!: TelegramService;
   private dbClient: SupabaseClientManager;
+  private symbolMapper = getSymbolMapper();
+  private symbolMappingService: SymbolMappingService;
   private isRunning = false;
   private mainLoop: NodeJS.Timeout | null = null;
+  private startTime: Date;
+  private activeExchanges: IExchange[] = [];
 
   constructor() {
     this.dbClient = SupabaseClientManager.getInstance();
     this.dataCollector = new DataCollector();
-    this.arbitrageAnalyzer = new ArbitrageAnalyzer(this.dataCollector);
+    this.symbolMappingService = new SymbolMappingService();
+    this.startTime = new Date();
   }
 
   public async start(): Promise<void> {
@@ -58,10 +76,11 @@ class FundingArbitrageEngine {
 
       // Stop services
       this.dataCollector.stop();
+      this.positionMonitor.stop();
 
       // Disconnect exchanges
       await Promise.all(
-        this.exchanges.map(exchange => exchange.disconnect())
+        this.activeExchanges.map(exchange => exchange.disconnect())
       );
 
       logger.info('Funding Rate Arbitrage Engine stopped successfully');
@@ -80,11 +99,32 @@ class FundingArbitrageEngine {
         throw new Error('Failed to connect to database');
       }
 
+      // Initialize symbol mapper and comprehensive symbol mapping service
+      await this.symbolMapper.initialize();
+      
+      // Load or build comprehensive symbol mappings
+      logger.info('Loading comprehensive symbol mappings...');
+      await this.symbolMappingService.loadMappingsFromDatabase();
+      
+      // Log mapping statistics
+      const stats = this.symbolMappingService.getMappingStats();
+      logger.info(`Symbol mapping stats: ${stats.totalSymbols} total symbols, ${JSON.stringify(stats.byExchange)} by exchange`);
+
       // Initialize exchanges
       await this.initializeExchanges();
 
+      // Initialize services
+      this.arbitrageAnalyzer = ArbitrageAnalyzer.getInstance(this.dataCollector, this.symbolMappingService);
+      this.orderExecutor = new OrderExecutor(this.activeExchanges);
+      this.riskManager = new RiskManager(this.activeExchanges);
+      this.positionMonitor = new PositionMonitor(this.activeExchanges, this.orderExecutor);
+      this.telegramService = TelegramService.getInstance();
+
       // Start data collection
-      await this.dataCollector.start(this.exchanges);
+      await this.dataCollector.start(this.activeExchanges);
+
+      // Start position monitoring
+      this.positionMonitor.start();
 
       // Collect initial historical data
       await this.collectInitialData();
@@ -96,32 +136,70 @@ class FundingArbitrageEngine {
     }
   }
 
+  /**
+   * Initialize exchange connections
+   */
   private async initializeExchanges(): Promise<void> {
-    try {
-      logger.info('Initializing exchanges...');
+    logger.info('Initializing exchanges...');
+    this.activeExchanges = [];
 
-      // Initialize Bybit
-      if (process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET) {
+    // Initialize Bybit
+    if (process.env.BYBIT_API_KEY && process.env.BYBIT_API_SECRET) {
+      try {
+        logger.info('Initializing bybit exchange');
         const bybit = new BybitExchange();
         await bybit.initialize();
-        this.exchanges.push(bybit);
-        logger.info('Bybit exchange initialized');
-      } else {
-        logger.warn('Bybit API credentials not found, skipping');
+        this.activeExchanges.push(bybit);
+        logger.info('Bybit exchange initialized successfully');
+      } catch (error) {
+        logger.error('Failed to initialize Bybit:', (error as Error).message);
       }
-
-      // TODO: Initialize other exchanges (Bitget, KuCoin, Hyperliquid)
-      // Similar pattern as Bybit
-
-      if (this.exchanges.length === 0) {
-        throw new Error('No exchanges were initialized');
-      }
-
-      logger.info(`Initialized ${this.exchanges.length} exchanges`);
-    } catch (error) {
-      logError(error as Error, { context: 'initializeExchanges' });
-      throw error;
     }
+
+    // Initialize Bitget
+    if (process.env.BITGET_API_KEY && process.env.BITGET_API_SECRET && process.env.BITGET_PASSPHRASE) {
+      try {
+        logger.info('Initializing bitget exchange');
+        const bitget = new BitgetExchange();
+        await bitget.initialize();
+        this.activeExchanges.push(bitget);
+        logger.info('Bitget exchange initialized successfully');
+      } catch (error) {
+        logger.error('Failed to initialize Bitget:', (error as Error).message);
+      }
+    }
+
+    // Only try to initialize KuCoin if explicitly enabled
+    if (process.env.ENABLE_KUCOIN === 'true' && process.env.KUCOIN_API_KEY && process.env.KUCOIN_API_SECRET && process.env.KUCOIN_PASSPHRASE) {
+      try {
+        logger.info('Initializing kucoin exchange');
+        const kucoin = new KucoinExchange();
+        await kucoin.initialize();
+        this.activeExchanges.push(kucoin);
+        logger.info('KuCoin exchange initialized successfully');
+      } catch (error) {
+        logger.error('Failed to initialize KuCoin:', (error as Error).message);
+      }
+    }
+
+    // Only try to initialize Hyperliquid if explicitly enabled
+    if (process.env.ENABLE_HYPERLIQUID === 'true' && process.env.HYPERLIQUID_PRIVATE_KEY) {
+      try {
+        logger.info('Initializing hyperliquid exchange');
+        const hyperliquid = new HyperliquidExchange();
+        await hyperliquid.initialize();
+        this.activeExchanges.push(hyperliquid);
+        logger.info('Hyperliquid exchange initialized successfully');
+      } catch (error) {
+        logger.error('Failed to initialize Hyperliquid:', (error as Error).message);
+      }
+    }
+
+    if (this.activeExchanges.length === 0) {
+      throw new Error('No exchanges were initialized');
+    }
+
+    logger.info(`Initialized ${this.activeExchanges.length} exchanges successfully`);
   }
 
   private async collectInitialData(): Promise<void> {
@@ -130,7 +208,7 @@ class FundingArbitrageEngine {
 
       // Collect last 72 hours of funding rate data
       await this.dataCollector.collectHistoricalFundingRates(
-        this.exchanges,
+        this.activeExchanges,
         arbitrageConfig.symbols,
         arbitrageConfig.analysisWindowHours
       );
@@ -162,116 +240,190 @@ class FundingArbitrageEngine {
     try {
       logger.info('Running arbitrage analysis cycle');
 
+      // Check risk conditions first
+      const riskSummary = await this.riskManager.getRiskSummary();
+      
+      if (riskSummary.riskLevel === 'CRITICAL') {
+        logger.warn('CRITICAL risk level detected, skipping new trades');
+        logger.warn(`Risk warnings: ${riskSummary.warnings.join(', ')}`);
+        return;
+      }
+
+      if (riskSummary.riskLevel === 'HIGH') {
+        logger.warn(`HIGH risk level: ${riskSummary.warnings.join(', ')}`);
+      }
+
       // Find arbitrage opportunities
-      const opportunities = await this.arbitrageAnalyzer.findOpportunities(this.exchanges);
+      const opportunities = await this.arbitrageAnalyzer.findOpportunities(this.activeExchanges);
 
       if (opportunities.length === 0) {
         logger.info('No arbitrage opportunities found');
         return;
       }
 
-      // Process the best opportunity
-      const bestOpportunity = opportunities[0];
-      logger.info(`Processing best opportunity: ${bestOpportunity.baseSymbol} ` +
-        `(${bestOpportunity.longExchange} -> ${bestOpportunity.shortExchange}, ` +
-        `${bestOpportunity.estimatedProfitBps} bps)`);
+      logger.info(`Found ${opportunities.length} potential opportunities`);
 
-      // Validate opportunity is still good
-      const isValid = await this.arbitrageAnalyzer.validateOpportunity(bestOpportunity);
-      if (!isValid) {
-        logger.warn('Best opportunity validation failed');
-        return;
+      // Process opportunities
+      for (const opportunity of opportunities.slice(0, 3)) { // Limit to top 3
+        try {
+          // Validate opportunity with risk manager
+          const isValidRisk = await this.riskManager.validateTrade(opportunity);
+          if (!isValidRisk) {
+            logger.info(`Opportunity ${opportunity.baseSymbol} rejected by risk manager`);
+            continue;
+          }
+
+          // Re-validate opportunity is still good
+          const isValidOpportunity = await this.arbitrageAnalyzer.validateOpportunity(opportunity);
+          if (!isValidOpportunity) {
+            logger.info(`Opportunity ${opportunity.baseSymbol} validation failed`);
+            continue;
+          }
+
+          logger.info(`Executing opportunity: ${opportunity.baseSymbol} ` +
+            `(${opportunity.longExchange} -> ${opportunity.shortExchange}, ` +
+            `${opportunity.estimatedProfitBps} bps)`);
+
+          // Execute arbitrage
+          const strategyId = await this.orderExecutor.executeArbitrage(opportunity);
+          
+          logger.info(`Successfully executed arbitrage strategy ${strategyId}`);
+          break; // Execute only one opportunity per cycle
+
+        } catch (error) {
+          logError(error as Error, { 
+            context: 'runArbitrageLoop_execute',
+            opportunity: opportunity.baseSymbol 
+          });
+          // Continue to next opportunity
+        }
       }
-
-      // Execute arbitrage (placeholder - would need OrderExecutor)
-      await this.executeArbitrage(bestOpportunity);
 
     } catch (error) {
       logError(error as Error, { context: 'runArbitrageLoop' });
     }
   }
 
-  private async executeArbitrage(opportunity: ArbitrageOpportunity): Promise<void> {
-    try {
-      logger.info(`Executing arbitrage for ${opportunity.baseSymbol}`);
-
-      // This is a placeholder implementation
-      // In a real system, this would use the OrderExecutor service
-      
-      logger.warn('Arbitrage execution not implemented yet - this is a placeholder');
-      
-      // TODO: Implement actual order execution
-      // 1. Get the exchanges
-      // 2. Set leverage on both exchanges
-      // 3. Calculate optimal position size
-      // 4. Execute IOC orders on both exchanges
-      // 5. Verify both legs filled
-      // 6. Store positions in database
-      // 7. Start position monitoring
-
-    } catch (error) {
-      logError(error as Error, { 
-        context: 'executeArbitrage',
-        opportunity: {
-          baseSymbol: opportunity.baseSymbol,
-          longExchange: opportunity.longExchange,
-          shortExchange: opportunity.shortExchange,
-        }
-      });
-    }
-  }
-
   public async getStatus(): Promise<{
     isRunning: boolean;
+    uptime: number;
     exchangeCount: number;
     exchanges: string[];
     dataCollector: any;
-    uptime: number;
+    positionMonitor: any;
+    riskSummary: any;
+    activeStrategies: number;
+    telegramStatus: {
+      enabled: boolean;
+      isRunning: boolean;
+    };
   }> {
-    const startTime = Date.now(); // This should be tracked properly
-    
+    const uptime = (Date.now() - this.startTime.getTime()) / 1000; // in seconds
+    const riskSummary = await this.riskManager.getRiskSummary();
+    const monitoringStatus = await this.positionMonitor.getMonitoringStatus();
+
     return {
       isRunning: this.isRunning,
-      exchangeCount: this.exchanges.length,
-      exchanges: this.exchanges.map(ex => ex.getName()),
-      dataCollector: this.dataCollector.getStatus(),
-      uptime: 0, // Would need to track start time
+      uptime,
+      exchangeCount: this.activeExchanges.length,
+      exchanges: this.activeExchanges.map(e => e.getName()),
+      dataCollector: await this.dataCollector.getStatus(),
+      positionMonitor: monitoringStatus,
+      riskSummary,
+      activeStrategies: monitoringStatus.activePositions,
+      telegramStatus: {
+        enabled: telegramConfig.enabled,
+        isRunning: telegramConfig.enabled
+      },
     };
+  }
+
+  public async emergencyShutdown(): Promise<void> {
+    try {
+      logger.warn('EMERGENCY SHUTDOWN INITIATED');
+
+      // Stop all new trades
+      this.isRunning = false;
+
+      // Close all active positions
+      const { data: strategies } = await this.dbClient.getClient()
+        .from('strategy_performance')
+        .select('strategy_id')
+        .eq('status', 'active');
+
+      if (strategies) {
+        for (const strategy of strategies) {
+          await this.orderExecutor.closeStrategy(strategy.strategy_id, 'emergency_shutdown');
+        }
+      }
+
+      // Stop all services
+      await this.stop();
+
+      logger.warn('EMERGENCY SHUTDOWN COMPLETED');
+    } catch (error) {
+      logError(error as Error, { context: 'emergencyShutdown' });
+    }
+  }
+
+  public async forceCloseAllPositions(): Promise<void> {
+    try {
+      logger.warn('Force closing all positions');
+
+      const { data: strategies } = await this.dbClient.getClient()
+        .from('strategy_performance')
+        .select('strategy_id')
+        .eq('status', 'active');
+
+      if (strategies) {
+        const closeTasks = strategies.map(strategy => 
+          this.orderExecutor.closeStrategy(strategy.strategy_id, 'force_close')
+        );
+
+        await Promise.allSettled(closeTasks);
+      }
+
+      logger.info('All positions closed');
+    } catch (error) {
+      logError(error as Error, { context: 'forceCloseAllPositions' });
+    }
   }
 }
 
-// Handle graceful shutdown
+// Create and export engine instance
+export const engine = new FundingArbitrageEngine();
+
+// Handle process termination gracefully
 process.on('SIGINT', async () => {
-  logger.info('Received SIGINT, shutting down gracefully');
+  logger.info('Received SIGINT, shutting down gracefully...');
   await engine.stop();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  logger.info('Received SIGTERM, shutting down gracefully');
+  logger.info('Received SIGTERM, shutting down gracefully...');
   await engine.stop();
   process.exit(0);
 });
 
-// Handle uncaught errors
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  logger.error('Uncaught Exception:', error);
+// Handle uncaught exceptions
+process.on('uncaughtException', async (error) => {
+  logger.error('Uncaught exception:', error);
+  await engine.emergencyShutdown();
   process.exit(1);
 });
 
-// Create and start the engine
-const engine = new FundingArbitrageEngine();
+process.on('unhandledRejection', async (reason, promise) => {
+  logger.error('Unhandled rejection at:', promise, 'reason:', reason);
+  await engine.emergencyShutdown();
+  process.exit(1);
+});
 
+// Start the engine if this file is run directly
 if (require.main === module) {
-  // Start the engine if this file is run directly
-  engine.start().catch(error => {
+  engine.start().catch(async (error) => {
     logger.error('Failed to start engine:', error);
+    await engine.emergencyShutdown();
     process.exit(1);
   });
-}
-
-export { FundingArbitrageEngine }; 
+} 

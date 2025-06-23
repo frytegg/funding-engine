@@ -44,17 +44,42 @@ if (!fs.existsSync('logs')) {
 }
 
 // Helper functions for structured logging
-export const logTrade = (data: {
+export interface KillSwitchLogData {
+  strategyId: string;
+  reason: string;
+  timestamp: Date;
   action: string;
-  exchange: string;
-  symbol: string;
-  side: string;
-  quantity: number;
-  price: number;
+}
+
+export interface TradeLogData {
+  action: string;
+  strategyId?: string;
+  baseSymbol: string;
+  longExchange?: string;
+  shortExchange?: string;
+  longPrice?: number;
+  shortPrice?: number;
+  size?: number;
+  expectedProfitBps?: number;
   success: boolean;
+  exchange?: string;
+  symbol?: string;
+  side?: string;
+  quantity?: number;
+  price?: number;
   error?: string;
-}) => {
-  logger.info('Trade executed', data);
+}
+
+export const logKillSwitch = (data: KillSwitchLogData): void => {
+  logger.warn('Kill Switch Activated', data);
+};
+
+export const logTrade = (data: TradeLogData): void => {
+  if (data.success) {
+    logger.info('Trade Executed', data);
+  } else {
+    logger.error('Trade Failed', data);
+  }
 };
 
 export const logArbitrage = (data: {
