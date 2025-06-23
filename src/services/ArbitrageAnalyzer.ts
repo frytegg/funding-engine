@@ -11,15 +11,31 @@ import {
   calculateFundingRateAverage, 
   calculateBasisPoints, 
   calculateOptimalOrderSize,
-  retryWithBackoff 
+  retryWithBackoff,
+  formatPercentage,
+  formatCurrency
 } from '../utils/helpers';
 import { arbitrageConfig, riskLimits } from '../config/arbitrage.config';
+import { SymbolMappingService } from './SymbolMappingService';
+import { TelegramService } from './TelegramService';
 
 export class ArbitrageAnalyzer {
+  private static instance: ArbitrageAnalyzer;
   private dataCollector: DataCollector;
+  private symbolMappingService: SymbolMappingService;
+  private telegramService: TelegramService;
 
-  constructor(dataCollector: DataCollector) {
+  private constructor(dataCollector: DataCollector, symbolMappingService: SymbolMappingService) {
     this.dataCollector = dataCollector;
+    this.symbolMappingService = symbolMappingService;
+    this.telegramService = TelegramService.getInstance();
+  }
+
+  public static getInstance(dataCollector: DataCollector, symbolMappingService: SymbolMappingService): ArbitrageAnalyzer {
+    if (!ArbitrageAnalyzer.instance) {
+      ArbitrageAnalyzer.instance = new ArbitrageAnalyzer(dataCollector, symbolMappingService);
+    }
+    return ArbitrageAnalyzer.instance;
   }
 
   public async findOpportunities(exchanges: IExchange[]): Promise<ArbitrageOpportunity[]> {
@@ -27,10 +43,27 @@ export class ArbitrageAnalyzer {
     const opportunities: ArbitrageOpportunity[] = [];
 
     try {
+      // Get symbols available on at least 2 of the active exchanges
+      const activeExchangeNames = exchanges.map(e => e.getName().toLowerCase());
+      const availableSymbols = this.symbolMappingService.getSymbolsForExchanges(activeExchangeNames);
+      
+      logger.info(`Analyzing ${availableSymbols.length} symbols available on active exchanges: ${activeExchangeNames.join(', ')}`);
+      
       // Analyze each symbol
-      for (const baseSymbol of arbitrageConfig.symbols) {
+      for (const baseSymbol of availableSymbols) {
         const symbolOpportunities = await this.analyzeSymbol(exchanges, baseSymbol);
         opportunities.push(...symbolOpportunities);
+
+        // Send alerts for new opportunities
+        for (const opportunity of symbolOpportunities) {
+          await this.telegramService.sendSignalAlert({
+            symbol: opportunity.baseSymbol,
+            longExchange: opportunity.longExchange,
+            shortExchange: opportunity.shortExchange,
+            fundingRate: opportunity.fundingRate,
+            expectedReturn: opportunity.expectedReturn
+          });
+        }
       }
 
       // Sort by estimated profit
@@ -218,16 +251,6 @@ export class ArbitrageAnalyzer {
         return null;
       }
 
-      // Calculate required capital
-      const midPrice = (longExchangeData.orderBook.bids[0].price + longExchangeData.orderBook.asks[0].price) / 2;
-      const requiredCapital = midPrice * liquidity.maxSize * 2; // Both long and short positions
-
-      // Check capital limits
-      if (requiredCapital > arbitrageConfig.maxPositionSizePerExchange * 2) {
-        logger.debug(`Required capital too high for ${baseSymbol}: ${requiredCapital}`);
-        return null;
-      }
-
       // Calculate confidence score
       const confidence = this.calculateConfidence(
         longExchangeData,
@@ -235,29 +258,23 @@ export class ArbitrageAnalyzer {
         liquidity
       );
 
+      // Create opportunity object
       const opportunity: ArbitrageOpportunity = {
         baseSymbol,
         longExchange: longExchangeData.exchange.getName(),
         shortExchange: shortExchangeData.exchange.getName(),
         longSymbol: longExchangeData.symbol,
         shortSymbol: shortExchangeData.symbol,
-        avgFundingRateDiff: fundingRateDiff,
+        fundingRate: fundingRateDiff,
+        expectedReturn: estimatedProfitBps * liquidity.maxSize,
         estimatedProfitBps,
-        requiredCapital,
+        requiredCapital: liquidity.maxSize * 2, // Need capital on both exchanges
         maxSize: liquidity.maxSize,
         longOrderBook: longExchangeData.orderBook,
         shortOrderBook: shortExchangeData.orderBook,
         confidence,
-        timestamp: new Date(),
+        timestamp: new Date()
       };
-
-      logger.info(`Arbitrage opportunity found for ${baseSymbol}:`, {
-        longExchange: opportunity.longExchange,
-        shortExchange: opportunity.shortExchange,
-        profitBps: opportunity.estimatedProfitBps,
-        requiredCapital: opportunity.requiredCapital,
-        confidence: opportunity.confidence,
-      });
 
       return opportunity;
     } catch (error) {
@@ -265,7 +282,7 @@ export class ArbitrageAnalyzer {
         context: 'analyzeOpportunity',
         baseSymbol,
         longExchange: longExchangeData.exchange.getName(),
-        shortExchange: shortExchangeData.exchange.getName(),
+        shortExchange: shortExchangeData.exchange.getName()
       });
       return null;
     }
@@ -454,25 +471,9 @@ export class ArbitrageAnalyzer {
     return Math.sqrt(variance);
   }
 
-  private getExchangeSymbol(exchangeName: string, baseSymbol: string): string {
-    // Simple mapping for now - should use SymbolMapper in production
-    const symbolMappings: Record<string, Record<string, string>> = {
-      'bybit': {
-        'BTC/USDT': 'BTCUSDT',
-        'ETH/USDT': 'ETHUSDT',
-        'SOL/USDT': 'SOLUSDT',
-        'AVAX/USDT': 'AVAXUSDT',
-        'MATIC/USDT': 'MATICUSDT',
-        'ADA/USDT': 'ADAUSDT',
-        'DOT/USDT': 'DOTUSDT',
-        'LINK/USDT': 'LINKUSDT',
-        'UNI/USDT': 'UNIUSDT',
-        'ATOM/USDT': 'ATOMUSDT',
-      },
-      // Add other exchanges here...
-    };
-
-    return symbolMappings[exchangeName]?.[baseSymbol] || '';
+  private getExchangeSymbol(exchangeName: string, baseSymbol: string): string | null {
+    // Use the comprehensive symbol mapping service
+    return this.symbolMappingService.getExchangeSymbol(baseSymbol, exchangeName) || null;
   }
 
   public async validateOpportunity(opportunity: ArbitrageOpportunity): Promise<boolean> {
@@ -512,4 +513,6 @@ export class ArbitrageAnalyzer {
       return false;
     }
   }
+
+
 } 

@@ -1,6 +1,6 @@
 import { ExchangeSymbols } from '../types/common';
 import { SupabaseClientManager } from '../database/supabase.client';
-import { logger } from './logger';
+import { logger, logError } from './logger';
 import { bybitSymbolMappings } from '../config/exchanges/bybit.config';
 import { bitgetSymbolMappings } from '../config/exchanges/bitget.config';
 import { kucoinSymbolMappings } from '../config/exchanges/kucoin.config';
@@ -10,6 +10,7 @@ export class SymbolMapper {
   private static instance: SymbolMapper;
   private mappings: Map<string, ExchangeSymbols> = new Map();
   private dbClient: SupabaseClientManager;
+  private initialized = false;
 
   private constructor() {
     this.dbClient = SupabaseClientManager.getInstance();
@@ -42,21 +43,67 @@ export class SymbolMapper {
     logger.info(`Initialized ${this.mappings.size} symbol mappings`);
   }
 
-  public async loadMappingsFromDatabase(): Promise<void> {
+  public async initialize(): Promise<void> {
+    if (this.initialized) return;
+
     try {
-      // This would fetch from database in a real implementation
-      // For now, we'll use the static mappings
-      logger.info('Symbol mappings loaded from database');
+      await this.loadMappings();
+      this.initialized = true;
+      logger.info('SymbolMapper initialized successfully');
     } catch (error) {
-      logger.error('Failed to load symbol mappings from database:', error);
+      logError(error as Error, { context: 'SymbolMapper.initialize' });
+      throw error;
     }
   }
 
-  public getExchangeSymbol(baseSymbol: string, exchange: string): string {
+  public async loadMappings(): Promise<void> {
+    try {
+      const { data, error } = await this.dbClient.getClient()
+        .from('symbol_mappings')
+        .select('*');
+
+      if (error) {
+        throw new Error(`Failed to load symbol mappings: ${error.message}`);
+      }
+
+      if (!data) {
+        logger.warn('No symbol mappings found in database');
+        return;
+      }
+
+      // Clear existing mappings
+      this.mappings.clear();
+
+      // Load mappings from database
+      data.forEach(mapping => {
+        const symbols: ExchangeSymbols = {
+          base: mapping.base_symbol,
+          bybit: mapping.bybit_symbol,
+          bitget: mapping.bitget_symbol,
+          kucoin: mapping.kucoin_symbol,
+          hyperliquid: mapping.hyperliquid_symbol,
+        };
+
+        this.mappings.set(mapping.base_symbol, symbols);
+      });
+
+      logger.info(`Loaded ${this.mappings.size} symbol mappings`);
+    } catch (error) {
+      logError(error as Error, { context: 'loadMappings' });
+      throw error;
+    }
+  }
+
+  public getExchangeSymbol(baseSymbol: string, exchange: string): string | null {
+    if (!this.initialized) {
+      logger.warn('SymbolMapper not initialized, call initialize() first');
+      return null;
+    }
+
     const mapping = this.mappings.get(baseSymbol);
     if (!mapping) {
       logger.warn(`No mapping found for base symbol: ${baseSymbol}`);
-      return '';
+      return null;
     }
 
     switch (exchange.toLowerCase()) {
@@ -70,7 +117,7 @@ export class SymbolMapper {
         return mapping.hyperliquid;
       default:
         logger.warn(`Unknown exchange: ${exchange}`);
-        return '';
+        return null;
     }
   }
 
@@ -97,12 +144,13 @@ export class SymbolMapper {
   }
 
   public getAllSymbolsForBase(baseSymbol: string): ExchangeSymbols | null {
-    const mapping = this.mappings.get(baseSymbol);
-    if (!mapping) {
-      logger.warn(`No mapping found for base symbol: ${baseSymbol}`);
+    if (!this.initialized) {
+      logger.warn('SymbolMapper not initialized, call initialize() first');
       return null;
     }
-    return mapping;
+
+    const mapping = this.mappings.get(baseSymbol);
+    return mapping || null;
   }
 
   public getSupportedBaseSymbols(): string[] {
@@ -133,45 +181,128 @@ export class SymbolMapper {
     }
   }
 
-  public async addMapping(mapping: ExchangeSymbols): Promise<boolean> {
+  public async addMapping(
+    baseSymbol: string,
+    bybitSymbol: string,
+    bitgetSymbol: string,
+    kucoinSymbol: string,
+    hyperliquidSymbol: string
+  ): Promise<boolean> {
     try {
-      this.mappings.set(mapping.base, mapping);
-      
-      // Save to database
-      const success = await this.dbClient.insertSymbolMapping({
-        baseSymbol: mapping.base,
-        bybitSymbol: mapping.bybit,
-        bitgetSymbol: mapping.bitget,
-        kucoinSymbol: mapping.kucoin,
-        hyperliquidSymbol: mapping.hyperliquid,
+      const { data, error } = await this.dbClient.getClient()
+        .from('symbol_mappings')
+        .insert({
+          base_symbol: baseSymbol,
+          bybit_symbol: bybitSymbol,
+          bitget_symbol: bitgetSymbol,
+          kucoin_symbol: kucoinSymbol,
+          hyperliquid_symbol: hyperliquidSymbol,
+        });
+
+      if (error) {
+        throw new Error(`Failed to add symbol mapping: ${error.message}`);
+      }
+
+      // Update local cache
+      this.mappings.set(baseSymbol, {
+        base: baseSymbol,
+        bybit: bybitSymbol,
+        bitget: bitgetSymbol,
+        kucoin: kucoinSymbol,
+        hyperliquid: hyperliquidSymbol,
       });
 
-      if (success) {
-        logger.info(`Added new symbol mapping for ${mapping.base}`);
-        return true;
-      } else {
-        logger.error(`Failed to save symbol mapping for ${mapping.base}`);
-        return false;
-      }
+      logger.info(`Added symbol mapping for ${baseSymbol}`);
+      return true;
     } catch (error) {
-      logger.error('Error adding symbol mapping:', error);
+      logError(error as Error, { context: 'addMapping', baseSymbol });
       return false;
     }
   }
 
-  public validateMapping(baseSymbol: string): boolean {
+  public async updateMapping(
+    baseSymbol: string,
+    updates: Partial<Omit<ExchangeSymbols, 'base'>>
+  ): Promise<boolean> {
+    try {
+      const updateData: any = {};
+      
+      if (updates.bybit) updateData.bybit_symbol = updates.bybit;
+      if (updates.bitget) updateData.bitget_symbol = updates.bitget;
+      if (updates.kucoin) updateData.kucoin_symbol = updates.kucoin;
+      if (updates.hyperliquid) updateData.hyperliquid_symbol = updates.hyperliquid;
+
+      const { data, error } = await this.dbClient.getClient()
+        .from('symbol_mappings')
+        .update(updateData)
+        .eq('base_symbol', baseSymbol);
+
+      if (error) {
+        throw new Error(`Failed to update symbol mapping: ${error.message}`);
+      }
+
+      // Update local cache
+      const existing = this.mappings.get(baseSymbol);
+      if (existing) {
+        this.mappings.set(baseSymbol, {
+          ...existing,
+          ...updates,
+        });
+      }
+
+      logger.info(`Updated symbol mapping for ${baseSymbol}`);
+      return true;
+    } catch (error) {
+      logError(error as Error, { context: 'updateMapping', baseSymbol });
+      return false;
+    }
+  }
+
+  public async removeMapping(baseSymbol: string): Promise<boolean> {
+    try {
+      const { data, error } = await this.dbClient.getClient()
+        .from('symbol_mappings')
+        .delete()
+        .eq('base_symbol', baseSymbol);
+
+      if (error) {
+        throw new Error(`Failed to remove symbol mapping: ${error.message}`);
+      }
+
+      // Remove from local cache
+      this.mappings.delete(baseSymbol);
+
+      logger.info(`Removed symbol mapping for ${baseSymbol}`);
+      return true;
+    } catch (error) {
+      logError(error as Error, { context: 'removeMapping', baseSymbol });
+      return false;
+    }
+  }
+
+  public validateMapping(baseSymbol: string): {
+    isValid: boolean;
+    missingExchanges: string[];
+  } {
     const mapping = this.mappings.get(baseSymbol);
-    if (!mapping) return false;
+    
+    if (!mapping) {
+      return {
+        isValid: false,
+        missingExchanges: ['bybit', 'bitget', 'kucoin', 'hyperliquid'],
+      };
+    }
 
-    // Ensure at least two exchanges have this symbol
-    const exchangeCount = [
-      mapping.bybit,
-      mapping.bitget,
-      mapping.kucoin,
-      mapping.hyperliquid,
-    ].filter(symbol => symbol && symbol.length > 0).length;
+    const missingExchanges: string[] = [];
+    if (!mapping.bybit) missingExchanges.push('bybit');
+    if (!mapping.bitget) missingExchanges.push('bitget');
+    if (!mapping.kucoin) missingExchanges.push('kucoin');
+    if (!mapping.hyperliquid) missingExchanges.push('hyperliquid');
 
-    return exchangeCount >= 2;
+    return {
+      isValid: missingExchanges.length === 0,
+      missingExchanges,
+    };
   }
 
   public getExchangesForSymbol(baseSymbol: string): string[] {
@@ -186,4 +317,63 @@ export class SymbolMapper {
 
     return exchanges;
   }
-} 
+
+  public getInverseMapping(exchangeSymbol: string, exchange: string): string | null {
+    for (const [baseSymbol, mapping] of this.mappings.entries()) {
+      switch (exchange.toLowerCase()) {
+        case 'bybit':
+          if (mapping.bybit === exchangeSymbol) return baseSymbol;
+          break;
+        case 'bitget':
+          if (mapping.bitget === exchangeSymbol) return baseSymbol;
+          break;
+        case 'kucoin':
+          if (mapping.kucoin === exchangeSymbol) return baseSymbol;
+          break;
+        case 'hyperliquid':
+          if (mapping.hyperliquid === exchangeSymbol) return baseSymbol;
+          break;
+      }
+    }
+    return null;
+  }
+
+  public async refresh(): Promise<void> {
+    await this.loadMappings();
+  }
+
+  public getStats(): {
+    totalMappings: number;
+    completeeMappings: number;
+    incompleteMappings: number;
+  } {
+    let completeMappings = 0;
+    let incompleteMappings = 0;
+
+    for (const [baseSymbol, mapping] of this.mappings.entries()) {
+      const validation = this.validateMapping(baseSymbol);
+      if (validation.isValid) {
+        completeMappings++;
+      } else {
+        incompleteMappings++;
+      }
+    }
+
+    return {
+      totalMappings: this.mappings.size,
+      completeeMappings: completeMappings,
+      incompleteMappings,
+    };
+  }
+}
+
+// Export function to get singleton instance
+export const getSymbolMapper = (): SymbolMapper => {
+  return SymbolMapper.getInstance();
+};
+
+// Legacy function for backward compatibility
+export const getExchangeSymbol = (exchangeName: string, baseSymbol: string): string => {
+  const mapper = getSymbolMapper();
+  return mapper.getExchangeSymbol(baseSymbol, exchangeName) || baseSymbol;
+}; 

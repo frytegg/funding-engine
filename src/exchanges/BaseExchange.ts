@@ -33,12 +33,16 @@ export abstract class BaseExchange implements IExchange {
     try {
       logger.info(`Initializing ${this.config.name} exchange`);
       
+      // Set initialized to true temporarily for connection test
+      this.isInitialized = true;
+      
       // Test connection
       await this.testConnection();
       
-      this.isInitialized = true;
       logger.info(`${this.config.name} exchange initialized successfully`);
     } catch (error) {
+      // Reset on failure
+      this.isInitialized = false;
       logger.error(`Failed to initialize ${this.config.name} exchange:`, error);
       throw error;
     }
