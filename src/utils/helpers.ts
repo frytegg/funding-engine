@@ -23,18 +23,20 @@ export const calculateBasisPoints = (value: number, reference: number): number =
   return ((value - reference) / reference) * 10000;
 };
 
-export const formatCurrency = (amount: number, currency = 'USD', decimals = 2): string => {
+export function formatCurrency(amount: number): string {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
-    currency,
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
+    currency: 'USD'
   }).format(amount);
-};
+}
 
-export const formatPercentage = (value: number, decimals = 2): string => {
-  return `${roundToDecimals(value, decimals)}%`;
-};
+export function formatPercentage(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'percent',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(value / 100);
+}
 
 export const formatBasisPoints = (value: number): string => {
   return `${roundToDecimals(value, 2)} bps`;
@@ -206,4 +208,34 @@ export const calculateWeightedAverage = (
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   
   return totalWeight === 0 ? 0 : weightedSum / totalWeight;
-}; 
+};
+
+export class RateLimiter {
+  private timestamps: number[] = [];
+  private readonly limit: number;
+  private readonly windowMs: number;
+
+  constructor(limit: number, windowMs: number) {
+    this.limit = limit;
+    this.windowMs = windowMs;
+  }
+
+  public async tryAcquire(): Promise<boolean> {
+    const now = Date.now();
+    const windowStart = now - this.windowMs;
+    
+    // Remove old timestamps
+    this.timestamps = this.timestamps.filter(ts => ts > windowStart);
+    
+    if (this.timestamps.length >= this.limit) {
+      return false;
+    }
+    
+    this.timestamps.push(now);
+    return true;
+  }
+
+  public clear(): void {
+    this.timestamps = [];
+  }
+} 

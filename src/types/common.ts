@@ -64,7 +64,8 @@ export interface ArbitrageOpportunity {
   shortExchange: string;
   longSymbol: string;
   shortSymbol: string;
-  avgFundingRateDiff: number;
+  fundingRate: number;
+  expectedReturn: number;
   estimatedProfitBps: number;
   requiredCapital: number;
   maxSize: number;
