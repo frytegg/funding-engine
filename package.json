@@ -1,0 +1,38 @@
+{
+	"name": "funding-rate-arbitrage",
+	"version": "1.0.0",
+	"description": "TypeScript-based funding rate arbitrage engine supporting Bybit, Bitget, KuCoin, and Hyperliquid",
+	"main": "dist/index.js",
+	"scripts": {
+		"build": "tsc",
+		"start": "node dist/index.js",
+		"dev": "tsx src/index.ts",
+		"dev:watch": "nodemon --exec tsx src/index.ts"
+	},
+	"dependencies": {
+		"typescript": "^5.8.3",
+		"@types/node": "^24.0.3",
+		"tsx": "^4.20.3",
+		"nodemon": "^3.1.10",
+		"@supabase/supabase-js": "^2.39.0",
+		"axios": "^1.6.0",
+		"ws": "^8.16.0",
+		"dotenv": "^16.3.1",
+		"uuid": "^9.0.1",
+		"winston": "^3.11.0",
+		"@types/ws": "^8.5.10",
+		"@types/uuid": "^9.0.7"
+	},
+	"keywords": [
+		"arbitrage",
+		"funding-rate",
+		"cryptocurrency",
+		"trading",
+		"bybit",
+		"bitget",
+		"kucoin",
+		"hyperliquid"
+	],
+	"author": "Alex Bot",
+	"license": "MIT"
+}
