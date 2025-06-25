@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "baseUrl": "./src",
+    "paths": {
+      "@config/*": ["config/*"],
+      "@exchanges/*": ["exchanges/*"],
+      "@services/*": ["services/*"],
+      "@database/*": ["database/*"],
+      "@utils/*": ["utils/*"],
+      "@types/*": ["types/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts"]
+} 
