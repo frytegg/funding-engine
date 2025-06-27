@@ -8,6 +8,7 @@ export abstract class BaseExchange implements IExchange {
   protected logger: Logger;
   protected connected: boolean = false;
   protected lastRequestTime: number = 0;
+  protected initialized: boolean = false;
 
   constructor(config: IExchangeConfig) {
     this.config = config;
@@ -20,6 +21,10 @@ export abstract class BaseExchange implements IExchange {
 
   public isConnected(): boolean {
     return this.connected;
+  }
+
+  public isInitialized(): boolean {
+    return this.initialized;
   }
 
   protected async rateLimitGuard(): Promise<void> {

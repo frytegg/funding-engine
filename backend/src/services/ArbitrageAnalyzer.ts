@@ -4,27 +4,51 @@ import { SymbolMapper } from '../utils/symbolMapper';
 import { Logger } from '../utils/logger';
 import { arbitrageConfig } from '../config/arbitrage.config';
 import { supabaseClient } from '../database/supabase.client';
+import { TelegramBotService } from './TelegramBot';
 import { 
   calculateBasisPoints, 
   calculateOptimalOrderSize, 
   calculateAnnualizedReturn,
   generateUUID
 } from '../utils/helpers';
+import { sleep } from '../utils/helpers';
 
 export class ArbitrageAnalyzer {
   private logger: Logger;
   private dataCollector: DataCollector;
   private symbolMapper: SymbolMapper;
+  private telegramBot: TelegramBotService;
+  private lastAnalysisTime: string;
 
-  constructor(dataCollector: DataCollector) {
+  constructor(dataCollector: DataCollector, telegramBot?: TelegramBotService) {
     this.logger = new Logger('ArbitrageAnalyzer');
     this.dataCollector = dataCollector;
     this.symbolMapper = SymbolMapper.getInstance();
+    this.telegramBot = telegramBot || new TelegramBotService();
+    this.lastAnalysisTime = new Date().toISOString();
+  }
+
+  public getLastAnalysisTime(): string {
+    return this.lastAnalysisTime;
   }
 
   public async analyzeOpportunities(): Promise<ArbitrageOpportunity[]> {
     this.logger.info('Starting arbitrage opportunity analysis');
 
+    // Verify we have fresh funding rate data
+    const { data, error } = await supabaseClient
+      .from('funding_rates')
+      .select('count')
+      .gte('timestamp', new Date(Date.now() - 5 * 60 * 1000).toISOString()) // last 5 minutes
+      .single();
+
+    if (error || !data || data.count === 0) {
+      this.logger.warn('No recent funding rates found, waiting for data collection...');
+      await sleep(30000); // Wait 30 seconds and try again
+      return this.analyzeOpportunities();
+    }
+
+    this.logger.info(`Found ${data.count} recent funding rates, proceeding with analysis`);
     const currentRates = await this.dataCollector.collectCurrentFundingRates();
     const opportunities: ArbitrageOpportunity[] = [];
 
@@ -46,6 +70,13 @@ export class ArbitrageAnalyzer {
     
     // Store opportunities in database
     await this.storeOpportunities(opportunities);
+
+    // Send Telegram alerts for new opportunities
+    await this.sendOpportunityAlerts(opportunities);
+
+    if (opportunities.length === 0) {
+      this.logger.info('🔍 No profitable arbitrage opportunities found');
+    }
 
     return opportunities;
   }
@@ -318,6 +349,95 @@ export class ArbitrageAnalyzer {
       this.logger.debug(`Stored ${records.length} arbitrage opportunities`);
     } catch (error) {
       this.logger.error('Failed to store opportunities:', error);
+    }
+  }
+
+  private async sendOpportunityAlerts(opportunities: ArbitrageOpportunity[]): Promise<void> {
+    if (opportunities.length === 0 || !this.telegramBot.isActive()) return;
+
+    try {
+      // Send alerts for high-quality opportunities only
+      const highQualityOpportunities = opportunities.filter(opp => 
+        opp.confidence > 0.6 && 
+        opp.riskScore < 0.7 && 
+        opp.estimatedProfit > 20 // Minimum $20 profit
+      );
+
+      // Limit to top 3 opportunities to avoid spam
+      const topOpportunities = highQualityOpportunities.slice(0, 3);
+
+      for (const opportunity of topOpportunities) {
+        await this.telegramBot.sendOpportunityAlert(opportunity);
+        
+        // Add small delay between alerts to avoid rate limiting
+        if (topOpportunities.length > 1) {
+          await sleep(1000);
+        }
+      }
+
+      if (topOpportunities.length > 0) {
+        this.logger.info(`Sent ${topOpportunities.length} opportunity alerts to Telegram`);
+      }
+    } catch (error) {
+      this.logger.error('Failed to send opportunity alerts:', error);
+    }
+  }
+
+  public async executeOpportunity(opportunityId: string): Promise<{ success: boolean; strategyId: string; error?: string }> {
+    try {
+      // Get opportunity details
+      const { data: opportunity } = await supabaseClient
+        .from('arbitrage_opportunities')
+        .select('*')
+        .eq('id', opportunityId)
+        .single();
+
+      if (!opportunity) {
+        return {
+          success: false,
+          strategyId: '',
+          error: 'Opportunity not found'
+        };
+      }
+
+      // Check if opportunity is still valid
+      if (opportunity.status !== 'identified') {
+        return {
+          success: false,
+          strategyId: '',
+          error: 'Opportunity is no longer valid'
+        };
+      }
+
+      // Generate strategy ID
+      const strategyId = `strategy_${Date.now()}`;
+
+      // Update opportunity status
+      await supabaseClient
+        .from('arbitrage_opportunities')
+        .update({ status: 'executing', strategy_id: strategyId })
+        .eq('id', opportunityId);
+
+      // Notify via Telegram if configured
+      if (this.telegramBot) {
+        await this.telegramBot.sendMessage(
+          `🚀 Executing opportunity ${opportunityId}\n` +
+          `Symbol: ${opportunity.symbol}\n` +
+          `Expected Profit: ${opportunity.estimated_profit} USD`
+        );
+      }
+
+      return {
+        success: true,
+        strategyId
+      };
+    } catch (error) {
+      this.logger.error('Error executing opportunity:', error);
+      return {
+        success: false,
+        strategyId: '',
+        error: 'Execution failed'
+      };
     }
   }
 } 

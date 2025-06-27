@@ -3,6 +3,7 @@ import { FundingRate, OrderBook, TradeOrder, TradeResult, Position } from '../..
 export interface IExchange {
   getName(): string;
   isConnected(): boolean;
+  isInitialized(): boolean;
   
   // Market data methods
   getFundingRates(symbol: string, hours?: number): Promise<FundingRate[]>;
