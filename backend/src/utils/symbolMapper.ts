@@ -6,9 +6,15 @@ export class SymbolMapper {
   private static instance: SymbolMapper;
   private mappings: Map<string, ExchangeSymbols> = new Map();
   private logger: Logger;
+  private lastLoadTime: Date | null = null;
 
   private constructor() {
     this.logger = new Logger('SymbolMapper');
+  }
+
+  private cleanSymbol(symbol: string): string {
+    // Remove trailing slash if present
+    return symbol.replace(/\/$/, '');
   }
 
   public static getInstance(): SymbolMapper {
@@ -16,6 +22,17 @@ export class SymbolMapper {
       SymbolMapper.instance = new SymbolMapper();
     }
     return SymbolMapper.instance;
+  }
+
+  public async reloadMappings(): Promise<void> {
+    this.logger.info('🔄 Reloading symbol mappings...');
+    await this.loadMappings();
+    this.lastLoadTime = new Date();
+    this.logger.info('✅ Symbol mappings reloaded successfully');
+  }
+
+  public getLastLoadTime(): Date | null {
+    return this.lastLoadTime;
   }
 
   public async loadMappings(): Promise<void> {
@@ -31,8 +48,9 @@ export class SymbolMapper {
 
       this.mappings.clear();
       data?.forEach(mapping => {
-        this.mappings.set(mapping.base_symbol, {
-          base: mapping.base_symbol,
+        const cleanBaseSymbol = this.cleanSymbol(mapping.base_symbol);
+        this.mappings.set(cleanBaseSymbol, {
+          base: cleanBaseSymbol,
           bybit: mapping.bybit_symbol,
           bitget: mapping.bitget_symbol,
           kucoin: mapping.kucoin_symbol,
@@ -40,17 +58,19 @@ export class SymbolMapper {
         });
       });
 
-      this.logger.info(`Loaded ${this.mappings.size} symbol mappings`);
+      this.lastLoadTime = new Date();
+      this.logger.info(`✅ Loaded ${this.mappings.size} symbol mappings`);
     } catch (error) {
-      this.logger.error('Failed to load symbol mappings:', error);
+      this.logger.error('❌ Failed to load symbol mappings:', error);
       throw error;
     }
   }
 
   public getExchangeSymbol(baseSymbol: string, exchange: string): string | null {
-    const mapping = this.mappings.get(baseSymbol);
+    const cleanBaseSymbol = this.cleanSymbol(baseSymbol);
+    const mapping = this.mappings.get(cleanBaseSymbol);
     if (!mapping) {
-      this.logger.warn(`No mapping found for base symbol: ${baseSymbol}`);
+      this.logger.warn(`No mapping found for base symbol: ${cleanBaseSymbol}`);
       return null;
     }
 
@@ -70,7 +90,8 @@ export class SymbolMapper {
   }
 
   public getAllSymbolsForBase(baseSymbol: string): ExchangeSymbols | null {
-    return this.mappings.get(baseSymbol) || null;
+    const cleanBaseSymbol = this.cleanSymbol(baseSymbol);
+    return this.mappings.get(cleanBaseSymbol) || null;
   }
 
   public getAvailableBaseSymbols(): string[] {
@@ -95,10 +116,11 @@ export class SymbolMapper {
 
   public async addSymbolMapping(mapping: ExchangeSymbols): Promise<void> {
     try {
+      const cleanBaseSymbol = this.cleanSymbol(mapping.base);
       const { error } = await supabaseClient
         .from('symbol_mappings')
         .upsert({
-          base_symbol: mapping.base,
+          base_symbol: cleanBaseSymbol,
           bybit_symbol: mapping.bybit,
           bitget_symbol: mapping.bitget,
           kucoin_symbol: mapping.kucoin,
@@ -110,8 +132,11 @@ export class SymbolMapper {
         throw new Error(`Failed to add symbol mapping: ${error.message}`);
       }
 
-      this.mappings.set(mapping.base, mapping);
-      this.logger.info(`Added symbol mapping for ${mapping.base}`);
+      this.mappings.set(cleanBaseSymbol, {
+        ...mapping,
+        base: cleanBaseSymbol
+      });
+      this.logger.info(`Added symbol mapping for ${cleanBaseSymbol}`);
     } catch (error) {
       this.logger.error('Failed to add symbol mapping:', error);
       throw error;

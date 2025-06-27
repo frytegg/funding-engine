@@ -1,18 +1,19 @@
 import * as ccxt from 'ccxt';
 import { BaseExchange } from '../BaseExchange';
-import { bybitConfig } from '../../config/exchanges/bybit.config';
+import { bitgetConfig } from '../../config/exchanges/bitget.config';
 import { FundingRate, OrderBook, TradeOrder, TradeResult, Position } from '../../types/common';
 import { v4 as uuidv4 } from 'uuid';
 
-export class BybitExchange extends BaseExchange {
-  private ccxtClient: ccxt.bybit;
+export class BitGetExchange extends BaseExchange {
+  private ccxtClient: ccxt.bitget;
 
   constructor() {
-    super(bybitConfig);
+    super(bitgetConfig);
     
-    this.ccxtClient = new ccxt.bybit({
+    this.ccxtClient = new ccxt.bitget({
       apiKey: this.config.apiKey,
       secret: this.config.apiSecret,
+      passphrase: this.config.passphrase,
       sandbox: this.config.testnet,
       enableRateLimit: true,
       options: {
@@ -26,7 +27,7 @@ export class BybitExchange extends BaseExchange {
       await this.ccxtClient.loadMarkets();
       this.connected = true;
       this.initialized = true;
-      this.logger.info('Connected to Bybit');
+      this.logger.info('Connected to BitGet');
     } catch (error) {
       this.connected = false;
       this.initialized = false;
@@ -37,7 +38,7 @@ export class BybitExchange extends BaseExchange {
   public async disconnect(): Promise<void> {
     this.connected = false;
     this.initialized = false;
-    this.logger.info('Disconnected from Bybit');
+    this.logger.info('Disconnected from BitGet');
   }
 
   public normalizeSymbol(symbol: string): string {
@@ -61,7 +62,9 @@ export class BybitExchange extends BaseExchange {
         nextFundingTime: new Date(rate.timestamp + 8 * 60 * 60 * 1000), // 8 hours later
       }));
     } catch (error) {
-      throw this.handleError(error, 'getFundingRates');
+      // Log warning but return empty array to avoid breaking the collection
+      this.logger.warn(`Failed to get funding rates for ${symbol}: ${(error as any).message}`);
+      return [];
     }
   }
 
@@ -80,6 +83,8 @@ export class BybitExchange extends BaseExchange {
         nextFundingTime: new Date(fundingRate.fundingDatetime || Date.now()),
       };
     } catch (error) {
+      // Log error but still throw it since this is called individually
+      this.logger.error(`Failed to get current funding rate for ${symbol}: ${(error as any).message}`);
       throw this.handleError(error, 'getCurrentFundingRate');
     }
   }

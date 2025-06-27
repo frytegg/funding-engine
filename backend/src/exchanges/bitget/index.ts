@@ -1,0 +1,1 @@
+export { BitGetExchange } from './BitGetExchange'; 

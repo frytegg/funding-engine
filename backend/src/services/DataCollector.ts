@@ -1,18 +1,21 @@
 import { IExchange } from '../exchanges/interfaces/IExchange';
-import { FundingRate, OrderBook } from '../types/common';
+import { FundingRate, OrderBook, Trade } from '../types/common';
 import { supabaseClient } from '../database/supabase.client';
 import { SymbolMapper } from '../utils/symbolMapper';
 import { Logger } from '../utils/logger';
 import { sleep } from '../utils/helpers';
+import { SupabaseClient } from '@supabase/supabase-js';
 
 export class DataCollector {
   private logger: Logger;
   private symbolMapper: SymbolMapper;
   private exchanges: Map<string, IExchange> = new Map();
+  private supabase: SupabaseClient;
 
   constructor() {
     this.logger = new Logger('DataCollector');
     this.symbolMapper = SymbolMapper.getInstance();
+    this.supabase = supabaseClient;
   }
 
   public addExchange(exchange: IExchange): void {
@@ -45,16 +48,24 @@ export class DataCollector {
     const fundingRates: FundingRate[] = [];
 
     for (const [exchangeName, exchange] of this.exchanges) {
-      try {
-        const exchangeSymbol = this.symbolMapper.getExchangeSymbol(baseSymbol, exchangeName);
-        if (!exchangeSymbol) continue;
+      const exchangeSymbol = this.symbolMapper.getExchangeSymbol(baseSymbol, exchangeName);
+      if (!exchangeSymbol) {
+        this.logger.debug(`No symbol mapping for ${baseSymbol} on ${exchangeName}`);
+        continue;
+      }
 
+      try {
         const rates = await exchange.getFundingRates(exchangeSymbol, hours);
         fundingRates.push(...rates);
 
         this.logger.debug(`Collected ${rates.length} funding rates from ${exchangeName} for ${baseSymbol}`);
-      } catch (error) {
-        this.logger.error(`Failed to collect funding rates from ${exchangeName} for ${baseSymbol}:`, error);
+      } catch (error: any) {
+        // Handle specific symbol not found errors more gracefully
+        if (error.name === 'BadSymbol' || error.message?.includes('does not have market symbol')) {
+          this.logger.warn(`Symbol ${exchangeSymbol} not available on ${exchangeName}, skipping...`);
+        } else {
+          this.logger.error(`Failed to collect funding rates from ${exchangeName} for ${baseSymbol}:`, error);
+        }
       }
     }
 
@@ -67,20 +78,50 @@ export class DataCollector {
     this.logger.info('Collecting current funding rates');
 
     const symbols = this.symbolMapper.getSymbolsAvailableOnMultipleExchanges();
+    this.logger.info(`Processing ${symbols.length} symbols: ${symbols.join(', ')}`);
     const currentRates = new Map<string, FundingRate[]>();
+    const databaseInsertionPromises: Promise<void>[] = [];
 
     for (const baseSymbol of symbols) {
       const rates: FundingRate[] = [];
 
       for (const [exchangeName, exchange] of this.exchanges) {
-        try {
-          const exchangeSymbol = this.symbolMapper.getExchangeSymbol(baseSymbol, exchangeName);
-          if (!exchangeSymbol) continue;
+        const exchangeSymbol = this.symbolMapper.getExchangeSymbol(baseSymbol, exchangeName);
+        if (!exchangeSymbol) {
+          this.logger.debug(`No symbol mapping for ${baseSymbol} on ${exchangeName}`);
+          continue;
+        }
 
+        try {
           const rate = await exchange.getCurrentFundingRate(exchangeSymbol);
           rates.push(rate);
-        } catch (error) {
-          this.logger.error(`Failed to get current funding rate from ${exchangeName} for ${baseSymbol}:`, error);
+
+          // Store the rate in database
+          const insertPromise = Promise.resolve(
+            supabaseClient
+              .from('funding_rates')
+              .insert({
+                exchange: exchangeName,
+                symbol: baseSymbol,
+                funding_rate: rate.fundingRate,
+                next_funding_time: rate.nextFundingTime,
+                timestamp: new Date().toISOString()
+              })
+              .then(({ error }) => {
+                if (error) {
+                  this.logger.error(`Failed to store funding rate for ${baseSymbol} on ${exchangeName}:`, error);
+                }
+              })
+          );
+
+          databaseInsertionPromises.push(insertPromise);
+        } catch (error: any) {
+          // Handle specific symbol not found errors more gracefully
+          if (error.name === 'BadSymbol' || error.message?.includes('does not have market symbol')) {
+            this.logger.warn(`Symbol ${exchangeSymbol} not available on ${exchangeName}, skipping...`);
+          } else {
+            this.logger.error(`Failed to get current funding rate from ${exchangeName} for ${baseSymbol}:`, error);
+          }
         }
       }
 
@@ -91,7 +132,11 @@ export class DataCollector {
       await sleep(100); // Brief pause between symbols
     }
 
-    this.logger.info(`Collected current funding rates for ${currentRates.size} symbols`);
+    // Wait for all database insertions to complete
+    this.logger.info('Waiting for all funding rates to be stored in database...');
+    await Promise.all(databaseInsertionPromises);
+    this.logger.info(`Successfully stored all funding rates for ${currentRates.size} symbols`);
+
     return currentRates;
   }
 
@@ -99,17 +144,25 @@ export class DataCollector {
     const orderBooks = new Map<string, OrderBook>();
 
     for (const [exchangeName, exchange] of this.exchanges) {
-      try {
-        const exchangeSymbol = this.symbolMapper.getExchangeSymbol(symbol, exchangeName);
-        if (!exchangeSymbol) continue;
+      const exchangeSymbol = this.symbolMapper.getExchangeSymbol(symbol, exchangeName);
+      if (!exchangeSymbol) {
+        this.logger.debug(`No symbol mapping for ${symbol} on ${exchangeName}`);
+        continue;
+      }
 
+      try {
         const orderBook = await exchange.getOrderBook(exchangeSymbol, 50);
         orderBooks.set(exchangeName, orderBook);
 
         // Store orderbook snapshot
         await this.storeOrderBookSnapshot(orderBook);
-      } catch (error) {
-        this.logger.error(`Failed to collect order book from ${exchangeName} for ${symbol}:`, error);
+      } catch (error: any) {
+        // Handle specific symbol not found errors more gracefully
+        if (error.name === 'BadSymbol' || error.message?.includes('does not have market symbol')) {
+          this.logger.warn(`Symbol ${exchangeSymbol} not available on ${exchangeName}, skipping...`);
+        } else {
+          this.logger.error(`Failed to collect order book from ${exchangeName} for ${symbol}:`, error);
+        }
       }
     }
 
@@ -126,15 +179,19 @@ export class DataCollector {
         timestamp: rate.timestamp.toISOString(),
       }));
 
+      // Use upsert to handle potential duplicates
       const { error } = await supabaseClient
         .from('funding_rates')
-        .insert(records);
+        .upsert(records, {
+          onConflict: 'exchange,symbol,timestamp',
+          ignoreDuplicates: true
+        });
 
       if (error) {
         throw new Error(`Failed to store funding rates: ${error.message}`);
       }
 
-      this.logger.debug(`Stored ${records.length} funding rate records`);
+      this.logger.debug(`Stored/updated ${records.length} funding rate records`);
     } catch (error) {
       this.logger.error('Failed to store funding rates:', error);
       throw error;
@@ -210,5 +267,59 @@ export class DataCollector {
 
     const sum = rates.reduce((acc, rate) => acc + rate.fundingRate, 0);
     return sum / rates.length;
+  }
+
+  public async getMarginInfo() {
+    try {
+      // Get margin information from all exchanges
+      const exchanges = await this.getActiveExchanges();
+      let totalMarginUsed = 0;
+      let totalMarginAvailable = 0;
+
+      for (const exchange of exchanges) {
+        const accountInfo = await exchange.getAccountInfo();
+        totalMarginUsed += accountInfo.marginUsed || 0;
+        totalMarginAvailable += accountInfo.marginAvailable || 0;
+      }
+
+      return {
+        marginUsed: totalMarginUsed,
+        marginAvailable: totalMarginAvailable,
+        marginUtilization: totalMarginAvailable > 0 ? (totalMarginUsed / totalMarginAvailable) * 100 : 0
+      };
+    } catch (error) {
+      this.logger.error('Error getting margin information:', error);
+      return {
+        marginUsed: 0,
+        marginAvailable: 0,
+        marginUtilization: 0
+      };
+    }
+  }
+
+  private async getActiveExchanges(): Promise<IExchange[]> {
+    return Array.from(this.exchanges.values()).filter(exchange => exchange.isInitialized());
+  }
+
+  public async getDailyVolume(): Promise<number> {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: trades } = await this.supabase
+      .from('trades')
+      .select('volume')
+      .gte('timestamp', oneDayAgo);
+
+    if (!trades) return 0;
+    return trades.reduce((sum: number, record: { volume: number }) => sum + Math.abs(record.volume || 0), 0);
+  }
+
+  public async getMonthlyVolume(): Promise<number> {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: trades } = await this.supabase
+      .from('trades')
+      .select('volume')
+      .gte('timestamp', thirtyDaysAgo);
+
+    if (!trades) return 0;
+    return trades.reduce((sum: number, record: { volume: number }) => sum + Math.abs(record.volume || 0), 0);
   }
 } 

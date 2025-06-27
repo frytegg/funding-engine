@@ -4,12 +4,16 @@
   "description": "TypeScript-based funding rate arbitrage engine",
   "private": true,
   "workspaces": [
-    "backend"
+    "backend",
+    "frontend"
   ],
   "scripts": {
     "dev": "npm run dev --workspace=backend",
     "build": "npm run build --workspace=backend",
-    "start": "npm run start --workspace=backend"
+    "start": "npm run start --workspace=backend",
+    "dev:frontend": "npm run dev --workspace=frontend",
+    "build:frontend": "npm run build --workspace=frontend",
+    "start:frontend": "npm run start --workspace=frontend"
   },
   "devDependencies": {
     "typescript": "^5.3.3",

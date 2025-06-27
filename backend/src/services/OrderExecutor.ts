@@ -2,6 +2,7 @@ import { IExchange } from '../exchanges/interfaces/IExchange';
 import { ArbitrageOpportunity, TradeOrder, TradeResult, Position, TPSLLevels } from '../types/common';
 import { supabaseClient } from '../database/supabase.client';
 import { Logger } from '../utils/logger';
+import { TelegramBotService } from './TelegramBot';
 import { 
   generateUUID, 
   calculateLiquidationPrice, 
@@ -11,9 +12,11 @@ import {
 export class OrderExecutor {
   private logger: Logger;
   private exchanges: Map<string, IExchange> = new Map();
+  private telegramBot: TelegramBotService;
 
-  constructor() {
+  constructor(telegramBot?: TelegramBotService) {
     this.logger = new Logger('OrderExecutor');
+    this.telegramBot = telegramBot || new TelegramBotService();
   }
 
   public addExchange(exchange: IExchange): void {
@@ -58,12 +61,19 @@ export class OrderExecutor {
       // 7. Update opportunity status
       await this.updateOpportunityStatus(opportunity, strategyId, 'executed');
 
+      // 8. Send Telegram alerts for successful trades
+      await this.sendTradeAlerts(longResult, shortResult, strategyId, 'EXECUTED');
+
       this.logger.info(`Successfully executed arbitrage strategy ${strategyId}`);
       return strategyId;
 
     } catch (error) {
       this.logger.error(`Failed to execute arbitrage strategy ${strategyId}:`, error);
       await this.updateOpportunityStatus(opportunity, strategyId, 'rejected');
+      
+      // Send Telegram alert for failed execution
+      await this.sendFailedExecutionAlert(opportunity, strategyId, error);
+      
       throw error;
     }
   }
@@ -345,6 +355,58 @@ export class OrderExecutor {
     } catch (error) {
       this.logger.error(`Failed to close strategy ${strategyId}:`, error);
       throw error;
+    }
+  }
+
+  private async sendTradeAlerts(
+    longResult: TradeResult, 
+    shortResult: TradeResult, 
+    strategyId: string, 
+    type: 'EXECUTED' | 'FAILED'
+  ): Promise<void> {
+    if (!this.telegramBot.isActive()) return;
+
+    try {
+      // Send alert for long position
+      await this.telegramBot.sendTradeAlert(longResult, strategyId, type);
+      
+      // Small delay to avoid rate limiting
+      await sleep(500);
+      
+      // Send alert for short position
+      await this.telegramBot.sendTradeAlert(shortResult, strategyId, type);
+
+      this.logger.info(`Sent trade alerts for strategy ${strategyId}`);
+    } catch (error) {
+      this.logger.error('Failed to send trade alerts:', error);
+    }
+  }
+
+  private async sendFailedExecutionAlert(
+    opportunity: ArbitrageOpportunity, 
+    strategyId: string, 
+    error: any
+  ): Promise<void> {
+    if (!this.telegramBot.isActive()) return;
+
+    try {
+      const errorMessage = `❌ *ARBITRAGE EXECUTION FAILED*
+
+🆔 *Strategy ID:* ${strategyId.slice(0, 8)}...
+📊 *Symbol:* ${opportunity.symbol}
+📈 *Long Exchange:* ${opportunity.longExchange}
+📉 *Short Exchange:* ${opportunity.shortExchange}
+💰 *Expected Profit:* $${opportunity.estimatedProfit.toFixed(2)}
+
+🚨 *Error:* ${error.message || 'Unknown error'}
+
+⏰ *Time:* ${new Date().toLocaleString()}`;
+
+      await this.telegramBot.sendMessage(errorMessage);
+      
+      this.logger.info(`Sent failed execution alert for strategy ${strategyId}`);
+    } catch (alertError) {
+      this.logger.error('Failed to send failed execution alert:', alertError);
     }
   }
 } 
