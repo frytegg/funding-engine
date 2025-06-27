@@ -81,6 +81,13 @@ export interface TPSLLevels {
   shortSL: number;
 }
 
+export interface Balance {
+  currency: string;
+  total: number;
+  available: number;
+  locked: number;
+}
+
 export interface RiskMetrics {
   totalExposure: number;
   maxDrawdown: number;
@@ -88,4 +95,12 @@ export interface RiskMetrics {
   winRate: number;
   avgProfit: number;
   avgLoss: number;
+}
+
+export interface Trade {
+  id?: string;
+  exchange: string;
+  symbol: string;
+  volume: number;
+  timestamp: string;
 } 

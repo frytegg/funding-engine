@@ -9,9 +9,7 @@ CREATE TABLE IF NOT EXISTS funding_rates (
   funding_rate DECIMAL(10, 8) NOT NULL,
   next_funding_time TIMESTAMP,
   timestamp TIMESTAMP NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_funding_rates_exchange_symbol_timestamp (exchange, symbol, timestamp),
-  INDEX idx_funding_rates_timestamp (timestamp)
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Order book snapshots table
@@ -23,8 +21,7 @@ CREATE TABLE IF NOT EXISTS orderbook_depth (
   ask_depth JSONB NOT NULL,
   spread DECIMAL(10, 8),
   timestamp TIMESTAMP NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_orderbook_exchange_symbol_timestamp (exchange, symbol, timestamp)
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Trade executions table
@@ -41,9 +38,7 @@ CREATE TABLE IF NOT EXISTS trades (
   order_type VARCHAR(20) NOT NULL,
   status VARCHAR(20) NOT NULL CHECK (status IN ('filled', 'partial', 'failed', 'cancelled')),
   fees DECIMAL(20, 8) DEFAULT 0,
-  created_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_trades_strategy_id (strategy_id),
-  INDEX idx_trades_exchange_symbol (exchange, symbol)
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Active positions table
@@ -62,8 +57,6 @@ CREATE TABLE IF NOT EXISTS positions (
   status VARCHAR(20) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed', 'closing')),
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_positions_strategy_id (strategy_id),
-  INDEX idx_positions_status (status),
   UNIQUE(strategy_id, exchange, symbol)
 );
 
@@ -97,9 +90,7 @@ CREATE TABLE IF NOT EXISTS arbitrage_opportunities (
   risk_score DECIMAL(5, 4) NOT NULL,
   status VARCHAR(20) DEFAULT 'identified' CHECK (status IN ('identified', 'executed', 'rejected', 'expired')),
   executed_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_arb_ops_symbol_timestamp (symbol, created_at),
-  INDEX idx_arb_ops_status (status)
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Risk metrics tracking
@@ -110,8 +101,7 @@ CREATE TABLE IF NOT EXISTS risk_metrics (
   max_drawdown DECIMAL(10, 6) NOT NULL,
   active_positions INTEGER NOT NULL,
   timestamp TIMESTAMP NOT NULL,
-  created_at TIMESTAMP DEFAULT NOW(),
-  INDEX idx_risk_metrics_timestamp (timestamp)
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- System logs table
@@ -121,10 +111,45 @@ CREATE TABLE IF NOT EXISTS system_logs (
   message TEXT NOT NULL,
   metadata JSONB,
   source VARCHAR(100),
-  timestamp TIMESTAMP DEFAULT NOW(),
-  INDEX idx_logs_level_timestamp (level, timestamp),
-  INDEX idx_logs_source (source)
+  timestamp TIMESTAMP DEFAULT NOW()
 );
+
+-- Create indexes separately (PostgreSQL syntax)
+CREATE INDEX IF NOT EXISTS idx_funding_rates_exchange_symbol_timestamp 
+ON funding_rates(exchange, symbol, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_funding_rates_timestamp 
+ON funding_rates(timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_orderbook_exchange_symbol_timestamp 
+ON orderbook_depth(exchange, symbol, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_trades_strategy_id 
+ON trades(strategy_id);
+
+CREATE INDEX IF NOT EXISTS idx_trades_exchange_symbol 
+ON trades(exchange, symbol);
+
+CREATE INDEX IF NOT EXISTS idx_positions_strategy_id 
+ON positions(strategy_id);
+
+CREATE INDEX IF NOT EXISTS idx_positions_status 
+ON positions(status);
+
+CREATE INDEX IF NOT EXISTS idx_arb_ops_symbol_timestamp 
+ON arbitrage_opportunities(symbol, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_arb_ops_status 
+ON arbitrage_opportunities(status);
+
+CREATE INDEX IF NOT EXISTS idx_risk_metrics_timestamp 
+ON risk_metrics(timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_logs_level_timestamp 
+ON system_logs(level, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_logs_source 
+ON system_logs(source);
 
 -- Create triggers for updated_at timestamps
 CREATE OR REPLACE FUNCTION update_updated_at_column()
